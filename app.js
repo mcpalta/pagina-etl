@@ -15,6 +15,10 @@ const client = new MongoClient(uri);
 
 const PORT = process.env.PORT || 3000;
 
+app.listen(PORT, () => {
+  console.log("Servidor listo en puerto " + PORT);
+});
+
 const comunasValidas = JSON.parse(
   fs.readFileSync("comunas.json", "utf-8")
 );
