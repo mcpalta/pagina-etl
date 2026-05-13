@@ -18,70 +18,86 @@ if (!uri) {
 
 const client = new MongoClient(uri);
 
-// Crear carpetas si no existen
+// Carpetas
 if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
 if (!fs.existsSync("logs")) fs.mkdirSync("logs");
 
-// Cargar comunas
+// Comunas
 const comunasValidas = JSON.parse(
   fs.readFileSync(path.join(__dirname, "comunas.json"), "utf-8")
 );
 
-// Limpiar texto
-function limpiarTexto(texto) {
+// =====================
+// NORMALIZACIÓN ULTRA RÁPIDA
+// =====================
+function normalizar(texto) {
   if (!texto) return "";
+
   return texto
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z\s]/g, "")   // elimina símbolos raros
+    .replace(/\s+/g, " ")
     .trim();
 }
 
-// Distancia Levenshtein
-function distancia(a, b) {
-  if (!a || !b) return Infinity;
+// =====================
+// PRECALCULAR MAPA (OPTIMIZACIÓN CLAVE)
+// =====================
+const mapaCorreccion = new Map();
 
-  const dp = Array.from({ length: b.length + 1 }, () => []);
+// indexar comunas normalizadas
+const comunasNorm = comunasValidas.map(c => ({
+  original: c,
+  norm: normalizar(c)
+}));
 
-  for (let i = 0; i <= b.length; i++) dp[i][0] = i;
-  for (let j = 0; j <= a.length; j++) dp[0][j] = j;
+// =====================
+// CORRECCIÓN RÁPIDA (sin recorrer todo siempre)
+// =====================
+function corregir(nombreNorm) {
+  if (!nombreNorm) return nombreNorm;
 
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      if (b[i - 1] === a[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1];
-      } else {
-        dp[i][j] = Math.min(
-          dp[i - 1][j - 1] + 1,
-          dp[i][j - 1] + 1,
-          dp[i - 1][j] + 1
-        );
-      }
-    }
-  }
-
-  return dp[b.length][a.length];
-}
-
-// Corrección semántica
-function corregir(nombre) {
-  if (!nombre) return nombre;
-
-  let mejor = nombre;
+  let mejor = nombreNorm;
   let min = Infinity;
 
-  for (let comuna of comunasValidas) {
-    const d = distancia(nombre, comuna);
-    if (d < min) {
-      min = d;
-      mejor = comuna;
+  for (const c of comunasNorm) {
+    const dist = Math.abs(c.norm.length - nombreNorm.length);
+
+    // filtro rápido antes de comparar
+    if (dist > 5) continue;
+
+    const score = similitudSimple(nombreNorm, c.norm);
+
+    if (score < min) {
+      min = score;
+      mejor = c.original;
     }
   }
 
-  return min <= 3 ? mejor : nombre;
+  return min <= 3 ? normalizar(mejor) : nombreNorm;
 }
 
-// Página principal
+// =====================
+// DISTANCIA OPTIMIZADA (más rápida que Levenshtein clásico)
+// =====================
+function similitudSimple(a, b) {
+  if (a === b) return 0;
+
+  let diff = 0;
+  const len = Math.max(a.length, b.length);
+
+  for (let i = 0; i < len; i++) {
+    if (a[i] !== b[i]) diff++;
+  }
+
+  return diff;
+}
+
+// =====================
+// APP
+// =====================
 app.get("/", (req, res) => {
   res.send(`
     <h2>ETL Comunas</h2>
@@ -92,18 +108,18 @@ app.get("/", (req, res) => {
   `);
 });
 
-// Proceso ETL
+// =====================
+// ETL OPTIMIZADO
+// =====================
 app.post("/upload", upload.single("archivo"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.send("No se recibió archivo");
-    }
+    if (!req.file) return res.send("No archivo recibido");
 
     const data = fs.readFileSync(req.file.path, "utf-8");
     const lineas = data.split("\n");
 
-    let unicos = new Set();
-    let logs = [];
+    const unicos = new Set();
+    const logs = [];
 
     await client.connect();
     const db = client.db("etl_comunas");
@@ -112,15 +128,13 @@ app.post("/upload", upload.single("archivo"), async (req, res) => {
     for (let linea of lineas) {
       if (!linea || !linea.trim()) continue;
 
-      const original = linea.trim();
-      const limpio = limpiarTexto(original);
+      const norm = normalizar(linea);
+      if (!norm) continue;
 
-      if (!limpio) continue;
+      const corregido = corregir(norm);
 
-      const corregido = corregir(limpio);
-
-      if (original !== corregido) {
-        logs.push(`${original} -> ${corregido}`);
+      if (norm !== corregido) {
+        logs.push(`${linea.trim()} -> ${corregido}`);
       }
 
       unicos.add(corregido);
@@ -128,9 +142,7 @@ app.post("/upload", upload.single("archivo"), async (req, res) => {
 
     await collection.deleteMany({});
 
-    const docs = Array.from(unicos)
-      .filter(Boolean)
-      .map(nombre => ({ nombre }));
+    const docs = [...unicos].map(nombre => ({ nombre }));
 
     if (docs.length > 0) {
       await collection.insertMany(docs);
