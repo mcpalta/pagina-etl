@@ -1,7 +1,6 @@
 const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
-const path = require("path");
 const { MongoClient } = require("mongodb");
 
 const app = express();
@@ -17,10 +16,18 @@ if (!uri) {
 
 const client = new MongoClient(uri);
 
+let db;
+
 // =====================
-// CARPETAS
+// CONEXIÓN MONGO (1 vez)
 // =====================
-if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
+async function connectDB() {
+  if (!db) {
+    await client.connect();
+    db = client.db("etl_comunas");
+  }
+  return db;
+}
 
 // =====================
 // NORMALIZACIÓN
@@ -40,18 +47,23 @@ function normalizar(texto) {
 // =====================
 function cargarCSV(filePath) {
   const data = fs.readFileSync(filePath, "utf-8");
-  const lines = data.split("\n").filter(Boolean);
+  const lines = data.split("\n").filter(l => l.trim());
 
   const map = new Map();
 
   for (let i = 1; i < lines.length; i++) {
-    const [codigo, nombre] = lines[i].split(",");
+    let line = lines[i];
+
+    let parts = line.includes("\t") ? line.split("\t") : line.split(",");
+
+    const codigo = parts[0]?.trim();
+    const nombre = parts.slice(1).join(" ").trim();
 
     if (!codigo || !nombre) continue;
 
     map.set(normalizar(nombre), {
-      codigo: codigo.trim(),
-      nombre: nombre.trim()
+      codigo,
+      nombre
     });
   }
 
@@ -63,7 +75,7 @@ function cargarCSV(filePath) {
 // =====================
 app.get("/", (req, res) => {
   res.send(`
-    <h2>ETL Comunas Completo</h2>
+    <h2>ETL Comunas</h2>
 
     <form action="/process" method="post" enctype="multipart/form-data">
       <p>Archivo TXT (datos sucios)</p>
@@ -74,9 +86,6 @@ app.get("/", (req, res) => {
 
       <button type="submit">Procesar</button>
     </form>
-
-    <br>
-    <a href="/resultados">Ver resultados</a>
   `);
 });
 
@@ -91,6 +100,10 @@ app.post(
   ]),
   async (req, res) => {
     try {
+      if (!req.files?.txt || !req.files?.csv) {
+        return res.send("Faltan archivos");
+      }
+
       const txtFile = req.files.txt[0];
       const csvFile = req.files.csv[0];
 
@@ -102,11 +115,7 @@ app.post(
       const unicos = new Map();
       const logs = [];
 
-      await client.connect();
-      const db = client.db("etl_comunas");
-
-      const collection = db.collection("comunas");
-      const logCollection = db.collection("logs");
+      const db = await connectDB();
 
       for (let linea of lineas) {
         if (!linea?.trim()) continue;
@@ -135,60 +144,59 @@ app.post(
         }
       }
 
-      // =====================
-      // GUARDAR LIMPIOS
-      // =====================
-      await collection.deleteMany({});
-      await collection.insertMany([...unicos.values()]);
+      const comunasFinales = [...unicos.values()];
 
       // =====================
-      // GUARDAR LOGS EN MONGO
+      // INSERT SEGURO (NO VACÍO)
       // =====================
-      await logCollection.insertMany(logs);
+      await db.collection("comunas").deleteMany({});
+
+      if (comunasFinales.length > 0) {
+        await db.collection("comunas").insertMany(comunasFinales);
+      }
+
+      if (logs.length > 0) {
+        await db.collection("logs").insertMany(logs);
+      }
 
       res.send(`
         <h3>Proceso terminado</h3>
-        <p>Comunas válidas: ${unicos.size}</p>
-        <a href="/resultados">Ver resultados</a>
+        <p>Comunas válidas: ${comunasFinales.length}</p>
+        <p>Registros procesados: ${logs.length}</p>
       `);
 
     } catch (err) {
-      console.error(err);
-      res.send("Error en el proceso");
+      console.error("ERROR:", err);
+      res.send("Error en el proceso (revisa consola)");
     }
   }
 );
 
 // =====================
-// RESULTADOS LIMPIOS
+// VER RESULTADOS
 // =====================
 app.get("/resultados", async (req, res) => {
   try {
-    await client.connect();
-    const db = client.db("etl_comunas");
+    const db = await connectDB();
 
     const data = await db.collection("comunas")
       .find({})
       .sort({ nombre: 1 })
       .toArray();
 
-    let html = `
-      <h2>Datos limpios</h2>
-      <table border="1">
-        <tr><th>Código</th><th>Comuna</th></tr>
-    `;
+    let html = "<h2>Datos limpios</h2><table border='1'><tr><th>Código</th><th>Comuna</th></tr>";
 
     for (let d of data) {
       html += `<tr><td>${d.codigo}</td><td>${d.nombre}</td></tr>`;
     }
 
-    html += `</table>`;
+    html += "</table>";
 
     res.send(html);
 
   } catch (err) {
     console.error(err);
-    res.send("Error");
+    res.send("Error al mostrar resultados");
   }
 });
 
