@@ -19,7 +19,7 @@ const client = new MongoClient(uri);
 let db;
 
 // =====================
-// CONEXIÓN MONGO (1 vez)
+// CONEXIÓN MONGO
 // =====================
 async function connectDB() {
   if (!db) {
@@ -30,31 +30,42 @@ async function connectDB() {
 }
 
 // =====================
-// NORMALIZACIÓN
+// NORMALIZACIÓN (CLAVE)
 // =====================
 function normalizar(texto) {
   return texto
+    .toString()
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z\s]/g, "")
+    .replace(/[\u0300-\u036f]/g, "") // tildes
+    .replace(/ñ/g, "n")
+    .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 // =====================
-// CARGAR CSV OFICIAL
+// CARGAR CSV OFICIAL (ROBUSTO)
 // =====================
 function cargarCSV(filePath) {
-  const data = fs.readFileSync(filePath, "utf-8");
+  const data = fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, "");
+
   const lines = data.split("\n").filter(l => l.trim());
 
   const map = new Map();
 
   for (let i = 1; i < lines.length; i++) {
-    let line = lines[i];
+    const line = lines[i];
 
-    let parts = line.includes("\t") ? line.split("\t") : line.split(",");
+    let parts;
+
+    if (line.includes("\t")) {
+      parts = line.split("\t");
+    } else if (line.includes(";")) {
+      parts = line.split(";");
+    } else {
+      parts = line.split(",");
+    }
 
     const codigo = parts[0]?.trim();
     const nombre = parts.slice(1).join(" ").trim();
@@ -78,10 +89,10 @@ app.get("/", (req, res) => {
     <h2>ETL Comunas</h2>
 
     <form action="/process" method="post" enctype="multipart/form-data">
-      <p>Archivo TXT (datos sucios)</p>
+      <p>TXT (datos sucios)</p>
       <input type="file" name="txt" required />
 
-      <p>Archivo CSV (comunas oficiales)</p>
+      <p>CSV (oficial)</p>
       <input type="file" name="csv" required />
 
       <button type="submit">Procesar</button>
@@ -147,7 +158,7 @@ app.post(
       const comunasFinales = [...unicos.values()];
 
       // =====================
-      // INSERT SEGURO (NO VACÍO)
+      // MONGO SAFE INSERT
       // =====================
       await db.collection("comunas").deleteMany({});
 
@@ -162,11 +173,11 @@ app.post(
       res.send(`
         <h3>Proceso terminado</h3>
         <p>Comunas válidas: ${comunasFinales.length}</p>
-        <p>Registros procesados: ${logs.length}</p>
+        <p>Total procesadas: ${logs.length}</p>
       `);
 
     } catch (err) {
-      console.error("ERROR:", err);
+      console.error("ERROR REAL:", err);
       res.send("Error en el proceso (revisa consola)");
     }
   }
