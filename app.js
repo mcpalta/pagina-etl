@@ -2,38 +2,17 @@ const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
-const { MongoClient } = require("mongodb");
-const Fuse = require("fuse.js");
-require("dotenv").config();
 
 const app = express();
 const upload = multer({ dest: "uploads/" });
 
-const PORT = process.env.PORT || 3000;
-const uri = process.env.MONGO_URI;
-
-if (!uri) {
-  console.error("ERROR: MONGO_URI no está definida");
-  process.exit(1);
-}
-
-const client = new MongoClient(uri);
-
-// carpetas
 if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
 if (!fs.existsSync("logs")) fs.mkdirSync("logs");
 
-// comunas
-const comunasValidas = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "comunas.json"), "utf-8")
-);
-
 // =====================
-// NORMALIZACIÓN ÚNICA (CLAVE REAL)
+// NORMALIZACIÓN
 // =====================
 function normalizar(texto) {
-  if (!texto) return "";
-
   return texto
     .toLowerCase()
     .normalize("NFD")
@@ -44,42 +23,27 @@ function normalizar(texto) {
 }
 
 // =====================
-// MAPA (MATCH EXACTO ULTRA RÁPIDO)
+// CARGAR CSV OFICIAL
 // =====================
-const comunasMap = new Map();
+function cargarCSV(pathFile) {
+  const data = fs.readFileSync(pathFile, "utf-8");
 
-for (const c of comunasValidas) {
-  comunasMap.set(normalizar(c), c);
-}
+  const lines = data.split("\n").filter(Boolean);
 
-// =====================
-// FUZZY (FALLBACK)
-// =====================
-const fuse = new Fuse(comunasValidas.map(normalizar), {
-  includeScore: true,
-  threshold: 0.35
-});
+  const map = new Map();
 
-// =====================
-// FUNCIÓN FINAL DE CORRECCIÓN
-// =====================
-function obtenerComunaFinal(texto) {
-  const norm = normalizar(texto);
+  for (let i = 1; i < lines.length; i++) {
+    const [codigo, nombre] = lines[i].split(",");
 
-  // 1. match exacto
-  if (comunasMap.has(norm)) {
-    return normalizar(comunasMap.get(norm));
+    if (!codigo || !nombre) continue;
+
+    map.set(normalizar(nombre), {
+      codigo: codigo.trim(),
+      nombre: nombre.trim()
+    });
   }
 
-  // 2. fuzzy fallback
-  const result = fuse.search(norm);
-
-  if (result.length > 0 && result[0].score <= 0.35) {
-    return result[0].item;
-  }
-
-  // 3. fallback seguro
-  return norm;
+  return map;
 }
 
 // =====================
@@ -87,109 +51,80 @@ function obtenerComunaFinal(texto) {
 // =====================
 app.get("/", (req, res) => {
   res.send(`
-    <h2>ETL Comunas</h2>
+    <h2>ETL Comparación CSV vs TXT</h2>
 
-    <form action="/upload" method="post" enctype="multipart/form-data">
-      <input type="file" name="archivo" required />
+    <form action="/process" method="post" enctype="multipart/form-data">
+      <p>Archivo TXT (datos usuario):</p>
+      <input type="file" name="txt" required />
+
+      <p>Archivo CSV (oficial):</p>
+      <input type="file" name="csv" required />
+
       <button type="submit">Procesar</button>
     </form>
-
-    <br>
-    <a href="/resultados">Ver resultados</a>
   `);
 });
 
 // =====================
-// ETL
+// PROCESO
 // =====================
-app.post("/upload", upload.single("archivo"), async (req, res) => {
-  try {
-    if (!req.file) return res.send("No archivo recibido");
+app.post(
+  "/process",
+  upload.fields([
+    { name: "txt", maxCount: 1 },
+    { name: "csv", maxCount: 1 }
+  ]),
+  (req, res) => {
+    try {
+      const txtFile = req.files.txt[0];
+      const csvFile = req.files.csv[0];
 
-    const data = fs.readFileSync(req.file.path, "utf-8");
-    const lineas = data.split("\n");
+      const mapaOficial = cargarCSV(csvFile.path);
 
-    const unicos = new Set();
-    const logs = [];
+      const txtData = fs.readFileSync(txtFile.path, "utf-8");
+      const lineas = txtData.split("\n");
 
-    await client.connect();
-    const db = client.db("etl_comunas");
-    const collection = db.collection("comunas");
+      const unicos = new Set();
+      const logs = [];
 
-    for (let linea of lineas) {
-      if (!linea?.trim()) continue;
+      for (let linea of lineas) {
+        if (!linea?.trim()) continue;
 
-      const original = linea.trim();
-      const final = obtenerComunaFinal(original);
+        const norm = normalizar(linea);
 
-      if (!final) continue;
+        if (mapaOficial.has(norm)) {
+          const comuna = mapaOficial.get(norm);
 
-      const clave = normalizar(final);
+          if (!unicos.has(comuna.codigo)) {
+            unicos.add(comuna.codigo);
+          }
 
-      if (!unicos.has(clave)) {
-        unicos.add(clave);
+          if (linea.trim() !== comuna.nombre) {
+            logs.push(`${linea.trim()} -> ${comuna.nombre}`);
+          }
+        } else {
+          logs.push(`${linea.trim()} -> INVALIDA`);
+        }
       }
 
-      if (normalizar(original) !== clave) {
-        logs.push(`${original} -> ${final}`);
-      }
+      const resultado = [...unicos].map(codigo => codigo);
+
+      fs.writeFileSync("logs/log.txt", logs.join("\n"));
+
+      res.send(`
+        <h3>Proceso terminado</h3>
+        <p>Total comunas válidas: ${resultado.length}</p>
+        <p>Revisa logs</p>
+      `);
+
+    } catch (err) {
+      console.error(err);
+      res.send("Error en el proceso");
     }
-
-    await collection.deleteMany({});
-
-    const docs = [...unicos].map(nombre => ({ nombre }));
-
-    if (docs.length > 0) {
-      await collection.insertMany(docs);
-    }
-
-    fs.writeFileSync("logs/log.txt", logs.join("\n"));
-
-    res.send(`
-      <h3>Proceso terminado</h3>
-      <p>Total únicos: ${docs.length}</p>
-      <a href="/resultados">Ver resultados</a>
-    `);
-
-  } catch (err) {
-    console.error("ERROR:", err);
-    res.send("Error en el proceso");
   }
-});
+);
 
 // =====================
-// RESULTADOS
-// =====================
-app.get("/resultados", async (req, res) => {
-  try {
-    await client.connect();
-    const db = client.db("etl_comunas");
-    const collection = db.collection("comunas");
-
-    const datos = await collection.find({}).sort({ nombre: 1 }).toArray();
-
-    let html = `
-      <h2>Datos limpios</h2>
-
-      <table border="1" cellpadding="5">
-        <tr><th>Comuna</th></tr>
-    `;
-
-    for (let d of datos) {
-      html += `<tr><td>${d.nombre}</td></tr>`;
-    }
-
-    html += `</table>`;
-
-    res.send(html);
-
-  } catch (err) {
-    console.error(err);
-    res.send("Error al mostrar resultados");
-  }
-});
-
-// =====================
-app.listen(PORT, () => {
-  console.log("Servidor en puerto " + PORT);
+app.listen(3000, () => {
+  console.log("Servidor en http://localhost:3000");
 });
