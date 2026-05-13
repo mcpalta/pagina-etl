@@ -23,13 +23,13 @@ const client = new MongoClient(uri);
 if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
 if (!fs.existsSync("logs")) fs.mkdirSync("logs");
 
-// cargar comunas
+// comunas
 const comunasValidas = JSON.parse(
   fs.readFileSync(path.join(__dirname, "comunas.json"), "utf-8")
 );
 
 // =====================
-// NORMALIZACIÓN
+// NORMALIZACIÓN ÚNICA (CLAVE REAL)
 // =====================
 function normalizar(texto) {
   if (!texto) return "";
@@ -44,41 +44,41 @@ function normalizar(texto) {
 }
 
 // =====================
-// MAPA PARA MATCH EXACTO (RÁPIDO)
+// MAPA (MATCH EXACTO ULTRA RÁPIDO)
 // =====================
-const comunasNormMap = new Map();
+const comunasMap = new Map();
 
 for (const c of comunasValidas) {
-  comunasNormMap.set(normalizar(c), c);
+  comunasMap.set(normalizar(c), c);
 }
 
 // =====================
-// FUZZY SEARCH (FALLBACK)
+// FUZZY (FALLBACK)
 // =====================
-const fuse = new Fuse(comunasValidas, {
+const fuse = new Fuse(comunasValidas.map(normalizar), {
   includeScore: true,
   threshold: 0.35
 });
 
 // =====================
-// CORRECCIÓN HÍBRIDA
+// FUNCIÓN FINAL DE CORRECCIÓN
 // =====================
-function corregir(nombre) {
-  const norm = normalizar(nombre);
+function obtenerComunaFinal(texto) {
+  const norm = normalizar(texto);
 
-  // 1. match exacto (rápido)
-  if (comunasNormMap.has(norm)) {
-    return normalizar(comunasNormMap.get(norm));
+  // 1. match exacto
+  if (comunasMap.has(norm)) {
+    return normalizar(comunasMap.get(norm));
   }
 
   // 2. fuzzy fallback
   const result = fuse.search(norm);
 
   if (result.length > 0 && result[0].score <= 0.35) {
-    return normalizar(result[0].item);
+    return result[0].item;
   }
 
-  // 3. fallback final
+  // 3. fallback seguro
   return norm;
 }
 
@@ -119,13 +119,20 @@ app.post("/upload", upload.single("archivo"), async (req, res) => {
     for (let linea of lineas) {
       if (!linea?.trim()) continue;
 
-      const corregido = corregir(linea);
+      const original = linea.trim();
+      const final = obtenerComunaFinal(original);
 
-      if (linea.trim() !== corregido) {
-        logs.push(`${linea.trim()} -> ${corregido}`);
+      if (!final) continue;
+
+      const clave = normalizar(final);
+
+      if (!unicos.has(clave)) {
+        unicos.add(clave);
       }
 
-      unicos.add(corregido);
+      if (normalizar(original) !== clave) {
+        logs.push(`${original} -> ${final}`);
+      }
     }
 
     await collection.deleteMany({});
@@ -145,7 +152,7 @@ app.post("/upload", upload.single("archivo"), async (req, res) => {
     `);
 
   } catch (err) {
-    console.error(err);
+    console.error("ERROR:", err);
     res.send("Error en el proceso");
   }
 });
@@ -163,6 +170,7 @@ app.get("/resultados", async (req, res) => {
 
     let html = `
       <h2>Datos limpios</h2>
+
       <table border="1" cellpadding="5">
         <tr><th>Comuna</th></tr>
     `;
