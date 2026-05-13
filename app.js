@@ -1,18 +1,23 @@
+console.log("APP INICIANDO...");
 require("dotenv").config();
 
-const express = require("express");
-const multer = require("multer");
-const fs = require("fs");
-const { MongoClient } = require("mongodb");
+import express from "express";
+import multer from "multer";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { MongoClient } from "mongodb";
 
 const app = express();
 const upload = multer({ dest: "uploads/" });
 
-if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
-if (!fs.existsSync("logs")) fs.mkdirSync("logs");
+if (!existsSync("uploads")) mkdirSync("uploads");
+if (!existsSync("logs")) mkdirSync("logs");
 
 const uri = process.env.MONGO_URI;
-const client = new MongoClient(uri);
+
+if (!uri) {
+  console.log("ERROR: MONGO_URI no definida");
+  process.exit(1);
+}
 
 const PORT = process.env.PORT || 3000;
 
@@ -20,8 +25,10 @@ app.listen(PORT, () => {
   console.log("Servidor listo en puerto " + PORT);
 });
 
+const path = require("path");
+
 const comunasValidas = JSON.parse(
-  fs.readFileSync("comunas.json", "utf-8")
+  fs.readFileSync(path.join(__dirname, "comunas.json"), "utf-8")
 );
 
 function limpiarTexto(texto) {
@@ -83,7 +90,7 @@ app.get("/", (req, res) => {
 
 app.post("/upload", upload.single("archivo"), async (req, res) => {
   try {
-    const data = fs.readFileSync(req.file.path, "utf-8");
+    const data = readFileSync(req.file.path, "utf-8");
     const lineas = data.split("\n");
 
     let unicos = new Set();
@@ -113,7 +120,7 @@ app.post("/upload", upload.single("archivo"), async (req, res) => {
 
     await collection.insertMany(docs);
 
-    fs.writeFileSync("logs/log.txt", logs.join("\n"));
+    writeFileSync("logs/log.txt", logs.join("\n"));
 
     res.send(`
       <h3>Proceso terminado</h3>
