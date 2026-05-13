@@ -29,6 +29,7 @@ const comunasValidas = JSON.parse(
 
 // Limpiar texto
 function limpiarTexto(texto) {
+  if (!texto) return "";
   return texto
     .toLowerCase()
     .normalize("NFD")
@@ -38,6 +39,8 @@ function limpiarTexto(texto) {
 
 // Distancia Levenshtein
 function distancia(a, b) {
+  if (!a || !b) return Infinity;
+
   const dp = Array.from({ length: b.length + 1 }, () => []);
 
   for (let i = 0; i <= b.length; i++) dp[i][0] = i;
@@ -62,6 +65,8 @@ function distancia(a, b) {
 
 // Corrección semántica
 function corregir(nombre) {
+  if (!nombre) return nombre;
+
   let mejor = nombre;
   let min = Infinity;
 
@@ -79,7 +84,7 @@ function corregir(nombre) {
 // Página principal
 app.get("/", (req, res) => {
   res.send(`
-    <h2>ETL Comunas Online</h2>
+    <h2>ETL Comunas</h2>
     <form action="/upload" method="post" enctype="multipart/form-data">
       <input type="file" name="archivo" required />
       <button type="submit">Procesar</button>
@@ -90,17 +95,28 @@ app.get("/", (req, res) => {
 // Proceso ETL
 app.post("/upload", upload.single("archivo"), async (req, res) => {
   try {
+    if (!req.file) {
+      return res.send("No se recibió archivo");
+    }
+
     const data = fs.readFileSync(req.file.path, "utf-8");
     const lineas = data.split("\n");
 
     let unicos = new Set();
     let logs = [];
 
+    await client.connect();
+    const db = client.db("etl_comunas");
+    const collection = db.collection("comunas");
+
     for (let linea of lineas) {
-      if (!linea.trim()) continue;
+      if (!linea || !linea.trim()) continue;
 
       const original = linea.trim();
       const limpio = limpiarTexto(original);
+
+      if (!limpio) continue;
+
       const corregido = corregir(limpio);
 
       if (original !== corregido) {
@@ -110,28 +126,25 @@ app.post("/upload", upload.single("archivo"), async (req, res) => {
       unicos.add(corregido);
     }
 
-    await client.connect();
-    const db = client.db("etl_comunas");
-    const collection = db.collection("comunas");
-
     await collection.deleteMany({});
 
-    const docs = Array.from(unicos).map(nombre => ({
-      nombre
-    }));
+    const docs = Array.from(unicos)
+      .filter(Boolean)
+      .map(nombre => ({ nombre }));
 
-    await collection.insertMany(docs);
+    if (docs.length > 0) {
+      await collection.insertMany(docs);
+    }
 
     fs.writeFileSync("logs/log.txt", logs.join("\n"));
 
     res.send(`
       <h3>Proceso terminado</h3>
       <p>Total registros únicos: ${docs.length}</p>
-      <p>Proceso ETL ejecutado correctamente</p>
     `);
 
   } catch (err) {
-    console.error(err);
+    console.error("ERROR:", err);
     res.send("Error en el proceso");
   }
 });
