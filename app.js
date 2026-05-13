@@ -1,6 +1,4 @@
 require("dotenv").config();
-if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
-if (!fs.existsSync("logs")) fs.mkdirSync("logs");
 
 const express = require("express");
 const multer = require("multer");
@@ -9,6 +7,9 @@ const { MongoClient } = require("mongodb");
 
 const app = express();
 const upload = multer({ dest: "uploads/" });
+
+if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
+if (!fs.existsSync("logs")) fs.mkdirSync("logs");
 
 const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri);
