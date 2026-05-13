@@ -3,6 +3,7 @@ const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
 const { MongoClient } = require("mongodb");
+const Fuse = require("fuse.js");
 require("dotenv").config();
 
 const app = express();
@@ -43,34 +44,21 @@ function normalizar(texto) {
 }
 
 // =====================
-// CORRECCIÓN SIMPLE Y RÁPIDA
+// FUSE.JS (BÚSQUEDA INTELIGENTE)
 // =====================
-function similitud(a, b) {
-  let diff = 0;
-  const len = Math.max(a.length, b.length);
-
-  for (let i = 0; i < len; i++) {
-    if (a[i] !== b[i]) diff++;
-  }
-
-  return diff;
-}
+const fuse = new Fuse(comunasValidas.map(normalizar), {
+  includeScore: true,
+  threshold: 0.4
+});
 
 function corregir(nombre) {
-  let mejor = nombre;
-  let min = Infinity;
+  const resultado = fuse.search(nombre);
 
-  for (let c of comunasValidas) {
-    const n = normalizar(c);
-    const dist = similitud(nombre, n);
-
-    if (dist < min) {
-      min = dist;
-      mejor = n;
-    }
+  if (resultado.length > 0 && resultado[0].score <= 0.4) {
+    return resultado[0].item;
   }
 
-  return min <= 3 ? mejor : nombre;
+  return nombre;
 }
 
 // =====================
@@ -79,7 +67,6 @@ function corregir(nombre) {
 app.get("/", (req, res) => {
   res.send(`
     <h2>ETL Comunas</h2>
-
     <form action="/upload" method="post" enctype="multipart/form-data">
       <input type="file" name="archivo" required />
       <button type="submit">Procesar</button>
@@ -95,7 +82,7 @@ app.get("/", (req, res) => {
 // =====================
 app.post("/upload", upload.single("archivo"), async (req, res) => {
   try {
-    if (!req.file) return res.send("No archivo");
+    if (!req.file) return res.send("No archivo recibido");
 
     const data = fs.readFileSync(req.file.path, "utf-8");
     const lineas = data.split("\n");
@@ -142,7 +129,7 @@ app.post("/upload", upload.single("archivo"), async (req, res) => {
 });
 
 // =====================
-// RESULTADOS WEB (TABLA + BÚSQUEDA)
+// RESULTADOS
 // =====================
 app.get("/resultados", async (req, res) => {
   try {
@@ -154,10 +141,7 @@ app.get("/resultados", async (req, res) => {
 
     let html = `
       <h2>Datos limpios</h2>
-
-      <input type="text" id="buscador" placeholder="Buscar comuna..." onkeyup="filtrar()" />
-
-      <table border="1" cellpadding="5" id="tabla">
+      <table border="1" cellpadding="5">
         <tr><th>Comuna</th></tr>
     `;
 
@@ -165,59 +149,13 @@ app.get("/resultados", async (req, res) => {
       html += `<tr><td>${d.nombre}</td></tr>`;
     }
 
-    html += `
-      </table>
-
-      <br>
-      <a href="/exportar">Descargar CSV</a>
-
-      <script>
-        function filtrar() {
-          const input = document.getElementById("buscador");
-          const filter = input.value.toLowerCase();
-          const rows = document.querySelectorAll("#tabla tr");
-
-          for (let i = 1; i < rows.length; i++) {
-            const txt = rows[i].innerText.toLowerCase();
-            rows[i].style.display = txt.includes(filter) ? "" : "none";
-          }
-        }
-      </script>
-    `;
+    html += `</table>`;
 
     res.send(html);
 
   } catch (err) {
     console.error(err);
-    res.send("Error al mostrar resultados");
-  }
-});
-
-// =====================
-// EXPORT CSV
-// =====================
-app.get("/exportar", async (req, res) => {
-  try {
-    await client.connect();
-    const db = client.db("etl_comunas");
-    const collection = db.collection("comunas");
-
-    const datos = await collection.find({}).toArray();
-
-    let csv = "comuna\n";
-
-    for (let d of datos) {
-      csv += `${d.nombre}\n`;
-    }
-
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", "attachment; filename=comunas.csv");
-
-    res.send(csv);
-
-  } catch (err) {
-    console.error(err);
-    res.send("Error exportando CSV");
+    res.send("Error");
   }
 });
 
