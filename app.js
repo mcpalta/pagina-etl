@@ -2,12 +2,25 @@ const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
+const { MongoClient } = require("mongodb");
 
 const app = express();
 const upload = multer({ dest: "uploads/" });
 
+const PORT = process.env.PORT || 3000;
+const uri = process.env.MONGO_URI;
+
+if (!uri) {
+  console.error("ERROR: MONGO_URI no está definida");
+  process.exit(1);
+}
+
+const client = new MongoClient(uri);
+
+// =====================
+// CARPETAS
+// =====================
 if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
-if (!fs.existsSync("logs")) fs.mkdirSync("logs");
 
 // =====================
 // NORMALIZACIÓN
@@ -25,9 +38,8 @@ function normalizar(texto) {
 // =====================
 // CARGAR CSV OFICIAL
 // =====================
-function cargarCSV(pathFile) {
-  const data = fs.readFileSync(pathFile, "utf-8");
-
+function cargarCSV(filePath) {
+  const data = fs.readFileSync(filePath, "utf-8");
   const lines = data.split("\n").filter(Boolean);
 
   const map = new Map();
@@ -51,22 +63,25 @@ function cargarCSV(pathFile) {
 // =====================
 app.get("/", (req, res) => {
   res.send(`
-    <h2>ETL Comparación CSV vs TXT</h2>
+    <h2>ETL Comunas Completo</h2>
 
     <form action="/process" method="post" enctype="multipart/form-data">
-      <p>Archivo TXT (datos usuario):</p>
+      <p>Archivo TXT (datos sucios)</p>
       <input type="file" name="txt" required />
 
-      <p>Archivo CSV (oficial):</p>
+      <p>Archivo CSV (comunas oficiales)</p>
       <input type="file" name="csv" required />
 
       <button type="submit">Procesar</button>
     </form>
+
+    <br>
+    <a href="/resultados">Ver resultados</a>
   `);
 });
 
 // =====================
-// PROCESO
+// PROCESO ETL
 // =====================
 app.post(
   "/process",
@@ -74,7 +89,7 @@ app.post(
     { name: "txt", maxCount: 1 },
     { name: "csv", maxCount: 1 }
   ]),
-  (req, res) => {
+  async (req, res) => {
     try {
       const txtFile = req.files.txt[0];
       const csvFile = req.files.csv[0];
@@ -84,8 +99,14 @@ app.post(
       const txtData = fs.readFileSync(txtFile.path, "utf-8");
       const lineas = txtData.split("\n");
 
-      const unicos = new Set();
+      const unicos = new Map();
       const logs = [];
+
+      await client.connect();
+      const db = client.db("etl_comunas");
+
+      const collection = db.collection("comunas");
+      const logCollection = db.collection("logs");
 
       for (let linea of lineas) {
         if (!linea?.trim()) continue;
@@ -96,25 +117,39 @@ app.post(
           const comuna = mapaOficial.get(norm);
 
           if (!unicos.has(comuna.codigo)) {
-            unicos.add(comuna.codigo);
+            unicos.set(comuna.codigo, comuna);
           }
 
-          if (linea.trim() !== comuna.nombre) {
-            logs.push(`${linea.trim()} -> ${comuna.nombre}`);
-          }
+          logs.push({
+            original: linea.trim(),
+            resultado: comuna.nombre,
+            estado: "CORREGIDO"
+          });
+
         } else {
-          logs.push(`${linea.trim()} -> INVALIDA`);
+          logs.push({
+            original: linea.trim(),
+            resultado: null,
+            estado: "INVALIDO"
+          });
         }
       }
 
-      const resultado = [...unicos].map(codigo => codigo);
+      // =====================
+      // GUARDAR LIMPIOS
+      // =====================
+      await collection.deleteMany({});
+      await collection.insertMany([...unicos.values()]);
 
-      fs.writeFileSync("logs/log.txt", logs.join("\n"));
+      // =====================
+      // GUARDAR LOGS EN MONGO
+      // =====================
+      await logCollection.insertMany(logs);
 
       res.send(`
         <h3>Proceso terminado</h3>
-        <p>Total comunas válidas: ${resultado.length}</p>
-        <p>Revisa logs</p>
+        <p>Comunas válidas: ${unicos.size}</p>
+        <a href="/resultados">Ver resultados</a>
       `);
 
     } catch (err) {
@@ -125,6 +160,39 @@ app.post(
 );
 
 // =====================
-app.listen(3000, () => {
-  console.log("Servidor en http://localhost:3000");
+// RESULTADOS LIMPIOS
+// =====================
+app.get("/resultados", async (req, res) => {
+  try {
+    await client.connect();
+    const db = client.db("etl_comunas");
+
+    const data = await db.collection("comunas")
+      .find({})
+      .sort({ nombre: 1 })
+      .toArray();
+
+    let html = `
+      <h2>Datos limpios</h2>
+      <table border="1">
+        <tr><th>Código</th><th>Comuna</th></tr>
+    `;
+
+    for (let d of data) {
+      html += `<tr><td>${d.codigo}</td><td>${d.nombre}</td></tr>`;
+    }
+
+    html += `</table>`;
+
+    res.send(html);
+
+  } catch (err) {
+    console.error(err);
+    res.send("Error");
+  }
+});
+
+// =====================
+app.listen(PORT, () => {
+  console.log("Servidor en puerto " + PORT);
 });
