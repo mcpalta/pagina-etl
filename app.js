@@ -1,4 +1,6 @@
 require("dotenv").config();
+if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
+if (!fs.existsSync("logs")) fs.mkdirSync("logs");
 
 const express = require("express");
 const multer = require("multer");
